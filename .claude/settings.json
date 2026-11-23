@@ -1,0 +1,31 @@
+{
+	"hooks": {
+		"PostToolUse": [
+			{
+				"matcher": "Edit|Write|MultiEdit",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-edited-file.sh\"",
+						"timeout": 90,
+						"statusMessage": "A verificar lint e tipos..."
+					}
+				]
+			}
+		],
+		"PreToolUse": [
+			{
+				"matcher": "Bash",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-deploy-gate.sh\"",
+						"timeout": 600,
+						"onFailure": "block",
+						"statusMessage": "Pre-deploy gate: lint, tipos, testes e auditoria..."
+					}
+				]
+			}
+		]
+	}
+}
