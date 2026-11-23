@@ -54,11 +54,17 @@ O hook `.claude/hooks/pre-deploy-gate.sh` interceta `wrangler deploy`, `wrangler
 
 ## Auditoria de segurança no início de cada sessão
 
-**Regra do utilizador:** em cada sessão nova, antes de qualquer outra tarefa, corre o subagente `workers-security-reviewer` e mostra ao utilizador o resumo do relatório (tabela por gravidade). Só depois trata do pedido. Se o utilizador pedir para saltar nesta sessão, respeita. O hook `SessionStart` (`.claude/hooks/session-start-audit.sh`) relembra esta regra automaticamente ao arrancar.
+**Regra do utilizador:** no início de cada sessão nova, audita a segurança **só se o código mudou** desde a última auditoria.
+
+- O hook `SessionStart` (`.claude/hooks/session-start-audit.sh`) calcula a impressão digital do código relevante (`.claude/hooks/audit-fingerprint.sh`: `worker/`, `src/`, `wrangler.jsonc`, `index.html`, `package.json`, `package-lock.json`, incluindo alterações não commitadas e ficheiros novos). Compara-a com a primeira linha de `.claude/last-security-audit.md`.
+- **Igual**: não auditar. Dizer ao utilizador numa frase e seguir para o pedido.
+- **Diferente ou sem relatório**: antes de qualquer outra tarefa, correr o subagente `workers-security-reviewer` e mostrar o resumo (tabela por gravidade). Depois gravar o relatório completo em `.claude/last-security-audit.md` com a primeira linha `<!-- fingerprint: <hash> date: AAAA-MM-DD -->` e incluí-lo no próximo commit.
+- O hook dá a instrução exata, com o hash a usar. Se o utilizador pedir para saltar, respeitar e não atualizar o ficheiro.
+- Se o relatório não for commitado, a sessão seguinte volta a auditar. É intencional: na dúvida, audita-se.
 
 ## Hooks ativos (`.claude/settings.json`)
 
-- **No início de cada sessão nova**: instrução para correr a auditoria de segurança (ver acima).
+- **No início de cada sessão nova**: se o código mudou, instrução para correr a auditoria de segurança (ver acima).
 
 - **Depois de cada edição** de um `.ts`/`.tsx`: ESLint nesse ficheiro e `tsc -b`. Os erros voltam ao Claude para corrigir de imediato.
 - **Antes de publicar**: o pre-deploy gate descrito acima.
