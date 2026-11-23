@@ -4,7 +4,6 @@ export { WorkflowStatusDO } from "./durable-object";
 
 import {
 	MAX_EVENT_BODY_BYTES,
-	TOKEN_COOKIE,
 	clientKey,
 	generateToken,
 	getCookie,
@@ -12,8 +11,10 @@ import {
 	isValidInstanceId,
 	jsonError,
 	parseApprovalBody,
+	readBodyLimited,
 	sha256Hex,
 	tokenCookie,
+	tokenCookieName,
 	withSecurityHeaders,
 } from "./security";
 
@@ -81,23 +82,30 @@ async function handleStart(
 	if (!isSameOrigin(request, url)) {
 		return jsonError("Forbidden", 403);
 	}
-	const { success } = await env.START_LIMITER.limit({
-		key: clientKey(request),
-	});
-	if (!success) {
+	// Limite por cliente (IP ou /64) e teto global, porque um atacante com
+	// muitos endereços contornaria o limite por cliente
+	const perClient = await env.START_LIMITER.limit({ key: clientKey(request) });
+	const global = perClient.success
+		? await env.GLOBAL_START_LIMITER.limit({ key: "global" })
+		: perClient;
+	if (!perClient.success || !global.success) {
 		return jsonError("Too Many Requests", 429, { "Retry-After": "60" });
 	}
 
 	try {
+		// O dono é registado ANTES de a instância existir: se o registo falhar,
+		// não fica nenhuma instância órfã a correr (e a gastar) sem dono
+		const instanceId = crypto.randomUUID();
 		const token = generateToken();
-		const instance = await env.MY_WORKFLOW.create({
+		await statusStub(env, instanceId).setOwner(await sha256Hex(token));
+		await env.MY_WORKFLOW.create({
+			id: instanceId,
 			params: { timestamp: Date.now() },
 		});
-		await statusStub(env, instance.id).setOwner(await sha256Hex(token));
 
 		return Response.json(
-			{ instanceId: instance.id, message: "Workflow started successfully" },
-			{ headers: { "Set-Cookie": tokenCookie(token) } },
+			{ instanceId, message: "Workflow started successfully" },
+			{ headers: { "Set-Cookie": tokenCookie(instanceId, token) } },
 		);
 	} catch {
 		return jsonError("Failed to start workflow", 500);
@@ -145,9 +153,9 @@ async function handleEvent(
 	const denied = await checkAccess(request, env, rawId);
 	if (denied) return denied;
 
-	// Ler o corpo com limite de tamanho e validar antes de o usar
-	const text = await request.text();
-	if (new TextEncoder().encode(text).byteLength > MAX_EVENT_BODY_BYTES) {
+	// Ler o corpo sem nunca guardar mais de 2 KB em memória e validar antes de o usar
+	const text = await readBodyLimited(request, MAX_EVENT_BODY_BYTES);
+	if (text === null) {
 		return jsonError("Payload Too Large", 413);
 	}
 	let parsed: unknown;
@@ -210,7 +218,8 @@ function statusStub(env: Env, instanceId: string) {
 }
 
 /**
- * Rate limit -> formato do ID -> instância existe -> pedido vem do dono.
+ * Rate limit -> formato do ID -> tem a chave desta instância? -> instância
+ * existe -> a chave é a do dono.
  * Devolve uma resposta de erro, ou null se o acesso for permitido.
  */
 async function checkAccess(
@@ -226,6 +235,13 @@ async function checkAccess(
 		return jsonError("Invalid instance ID", 400);
 	}
 
+	// Sem a chave desta instância: 403 imediato, sem gastar chamadas à API de
+	// Workflows e sem revelar se o ID existe
+	const token = getCookie(request, tokenCookieName(rawId));
+	if (!token) {
+		return jsonError("Forbidden", 403);
+	}
+
 	// Confirmar que a instância existe ANTES de tocar no Durable Object,
 	// para não criar DOs para IDs inventados
 	try {
@@ -234,10 +250,6 @@ async function checkAccess(
 		return jsonError("Not Found", 404);
 	}
 
-	const token = getCookie(request, TOKEN_COOKIE);
-	if (!token) {
-		return jsonError("Forbidden", 403);
-	}
 	const isOwner = await statusStub(env, rawId).isOwner(await sha256Hex(token));
 	if (!isOwner) {
 		return jsonError("Forbidden", 403);

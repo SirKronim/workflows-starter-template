@@ -11,7 +11,7 @@ Demonstração interativa de **Cloudflare Workflows**: um frontend React mostra,
 | Lint | `npm run lint` |
 | Typecheck (as 3 configs TS) | `npx tsc -b` |
 | Testes (correm dentro do runtime Workers via miniflare) | `npm test` |
-| Validar a config de publicação sem publicar | `npm run check` |
+| Validar a config de publicação sem publicar (faz build primeiro) | `npm run check` |
 | Regenerar tipos do `Env` após mudar `wrangler.jsonc` | `npm run cf-typegen` |
 | Publicar | `npm run deploy` ⚠️ ver "Publicação" |
 
@@ -39,18 +39,20 @@ Demonstração interativa de **Cloudflare Workflows**: um frontend React mostra,
 ## Segurança
 
 **Modelo: chave por instância ("capability token").** Não há contas de utilizador.
-- `POST /api/workflow/start` gera uma chave aleatória de 256 bits e entrega-a no cookie `__Host-wf_token` (HttpOnly, Secure, SameSite=Strict, 1 h). O Durable Object da instância guarda só o hash SHA-256 (`setOwner`, definido uma única vez).
+- `POST /api/workflow/start` gera o ID (`crypto.randomUUID()`) e uma chave aleatória de 256 bits. Regista o hash SHA-256 no Durable Object (`setOwner`, uma única vez) **antes** de criar a instância, para nunca haver instâncias órfãs. Entrega a chave num cookie **por instância**, `__Host-wf_<id>` (HttpOnly, Secure, SameSite=Strict, 1 h), por isso vários workflows no mesmo browser não se apagam uns aos outros.
 - `status`, `event` e `/ws` exigem a chave do dono (`isOwner`, comparação em tempo constante).
 
-**Ordem das verificações em cada rota** (as mais baratas primeiro, para recusar abusos antes de gastar recursos pagos): método → `Origin` igual ao da app (POST e WebSocket) → rate limit por IP → formato UUID → a instância existe (`MY_WORKFLOW.get`, antes de tocar no DO) → dono.
+**Ordem das verificações em cada rota** (as mais baratas primeiro, para recusar abusos antes de gastar recursos pagos): método → `Origin` igual ao da app (POST e WebSocket) → rate limit → formato UUID → tem o cookie desta instância (senão 403, sem revelar se o ID existe) → a instância existe (`MY_WORKFLOW.get`, antes de tocar no DO) → dono.
 
-- **Rate limiting** (`wrangler.jsonc` → `ratelimits`): `START_LIMITER` 5/min e `API_LIMITER` 60/min, por `CF-Connecting-IP`.
-- **Corpo do evento**: `Content-Type: application/json`, até 2 KB, só `{ approved: boolean, comment?: string ≤ 500 }`, reconstruído antes do `sendEvent`.
-- **WebSocket**: no máximo 5 ligações por instância. As mensagens dos clientes são ignoradas; o `ping` é respondido por `setWebSocketAutoResponse`.
+- **Rate limiting** (`wrangler.jsonc` → `ratelimits`): `START_LIMITER` 5/min por cliente, `GLOBAL_START_LIMITER` 100/min para todos e `API_LIMITER` 60/min por cliente. O "cliente" é o IPv4, ou o prefixo **/64** em IPv6 (`clientKey`). Os contadores são janelas fixas de 60 s por localização da Cloudflare.
+- **Corpo do evento**: `Content-Type: application/json`, lido com `readBodyLimited` (nunca guarda mais de 2 KB em memória, com ou sem `Content-Length`), só `{ approved: boolean, comment?: string ≤ 500 }`, reconstruído antes do `sendEvent`.
+- **WebSocket**: no máximo 5 ligações por instância. O `ping` é respondido por `setWebSocketAutoResponse`. Qualquer outra mensagem fecha a ligação (1008). Todas as ligações fecham quando o workflow termina.
 - **Cabeçalhos**: `worker/security.ts` (API) e `public/_headers` (páginas). A CSP proíbe scripts e estilos inline e recursos externos: **não adicionar CDNs, fontes externas nem `<script>` inline** sem atualizar a CSP.
 - **Logs**: nunca registar texto livre do utilizador.
 
-Ao alterar rotas, acrescentar o teste correspondente em `test/api.test.ts`.
+Ao alterar rotas, acrescentar o teste correspondente em `test/api.test.ts`. Testes de rate limiting devem tolerar a mudança de janela (ver `expectRateLimited`).
+
+**A confirmar no painel da Cloudflare:** se os Workers Logs (observability) guardam os cabeçalhos do pedido. Se guardarem, o cookie com a chave fica nos logs durante até 1 h.
 
 **Opcional, se a app for só para uso pessoal:** proteger tudo com Cloudflare Access (configura-se no painel da Cloudflare, não no código).
 

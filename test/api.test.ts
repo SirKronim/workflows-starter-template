@@ -49,20 +49,47 @@ describe("POST /api/workflow/start", () => {
 		const { res, instanceId, setCookie } = await start();
 		expect(res.status).toBe(200);
 		expect(instanceId).toMatch(/^[0-9a-f-]{36}$/);
-		expect(setCookie).toContain("__Host-wf_token=");
+		expect(setCookie).toContain(`__Host-wf_${instanceId}=`);
 		expect(setCookie).toContain("HttpOnly");
 		expect(setCookie).toContain("Secure");
 		expect(setCookie).toContain("SameSite=Strict");
 	});
 
+	// O limitador da Cloudflare conta em janelas fixas de 60 s. Se o teste
+	// atravessar a mudança de janela, o contador reinicia a meio; com 11 pedidos
+	// (> 2 × 5) o limite tem de disparar mesmo nesse caso.
+	function expectRateLimited(statuses: number[]) {
+		expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
+		expect(statuses).toContain(429);
+		expect(statuses.filter((s) => s === 200).length).toBeLessThanOrEqual(10);
+	}
+
 	it("[#1] limita a criação a 5 por minuto por IP", async () => {
 		const ip = nextIp();
 		const statuses: number[] = [];
-		for (let i = 0; i < 7; i++) {
+		for (let i = 0; i < 11; i++) {
 			statuses.push((await start(ip)).res.status);
 		}
-		expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
-		expect(statuses).toContain(429);
+		expectRateLimited(statuses);
+	});
+
+	it("[2.ª #1] em IPv6 conta o bloco /64 inteiro (mudar de endereço não contorna o limite)", async () => {
+		const statuses: number[] = [];
+		for (let i = 1; i <= 11; i++) {
+			// 11 endereços diferentes, todos no mesmo /64
+			statuses.push((await start(`2001:db8:aaaa:1::${i}`)).res.status);
+		}
+		expectRateLimited(statuses);
+		// Outro /64 tem o seu próprio contador
+		expect((await start("2001:db8:aaaa:2::1")).res.status).toBe(200);
+	});
+
+	it("[2.ª #5] dois workflows no mesmo browser mantêm ambas as chaves", async () => {
+		const a = await start();
+		const b = await start();
+		const both = `${a.cookie}; ${b.cookie}`;
+		expect((await sendEvent(a.instanceId, { cookie: both })).status).toBe(200);
+		expect((await sendEvent(b.instanceId, { cookie: both })).status).toBe(200);
 	});
 
 	it("[#5] recusa pedidos de outra origem (CSRF)", async () => {
@@ -113,6 +140,32 @@ describe("POST /api/workflow/event/:id", () => {
 		expect((await sendEvent(instanceId, { cookie, body: huge })).status).toBe(413);
 	});
 
+	it("[2.ª #2] recusa corpos grandes enviados em stream (sem Content-Length)", async () => {
+		const { instanceId, cookie } = await start();
+		const chunk = new TextEncoder().encode("x".repeat(1024));
+		let sent = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (sent >= 10) return controller.close();
+				sent += 1;
+				controller.enqueue(chunk);
+			},
+		});
+		const res = await SELF.fetch(`${ORIGIN}/api/workflow/event/${instanceId}`, {
+			method: "POST",
+			headers: {
+				Origin: ORIGIN,
+				"Content-Type": "application/json",
+				Cookie: cookie,
+				"CF-Connecting-IP": nextIp(),
+			},
+			body: stream,
+		});
+		expect(res.status).toBe(413);
+		// Parou de ler pouco depois do limite de 2 KB (não leu os 10 KB)
+		expect(sent).toBeLessThan(10);
+	});
+
 	it("[#5] exige Origin da própria app e Content-Type JSON", async () => {
 		const { instanceId, cookie } = await start();
 		expect((await sendEvent(instanceId, { cookie, origin: "https://evil.example" })).status).toBe(403);
@@ -121,15 +174,21 @@ describe("POST /api/workflow/event/:id", () => {
 	});
 
 	it("[#12] rota exata, ID validado e 404 para instâncias inexistentes", async () => {
-		const { cookie } = await start();
+		const unknownCookie = `__Host-wf_${UNKNOWN_ID}=abc`;
 		const nested = await SELF.fetch(`${ORIGIN}/api/workflow/event/a/${UNKNOWN_ID}`, {
 			method: "POST",
-			headers: { Origin: ORIGIN, "Content-Type": "application/json", Cookie: cookie },
+			headers: { Origin: ORIGIN, "Content-Type": "application/json", Cookie: unknownCookie },
 			body: "{}",
 		});
 		expect(nested.status).toBe(404);
-		expect((await sendEvent("not-a-uuid", { cookie })).status).toBe(400);
-		expect((await sendEvent(UNKNOWN_ID, { cookie })).status).toBe(404);
+		expect((await sendEvent("not-a-uuid", { cookie: unknownCookie })).status).toBe(400);
+		expect((await sendEvent(UNKNOWN_ID, { cookie: unknownCookie })).status).toBe(404);
+	});
+
+	it("[2.ª #4] sem chave, recebe sempre 403 (não revela se o ID existe)", async () => {
+		const { instanceId } = await start();
+		expect((await sendEvent(instanceId, {})).status).toBe(403);
+		expect((await sendEvent(UNKNOWN_ID, {})).status).toBe(403);
 	});
 });
 
@@ -171,9 +230,21 @@ describe("GET /ws", () => {
 	});
 
 	it("[#4] recusa IDs inventados sem criar Durable Objects", async () => {
-		const { cookie } = await start();
+		const cookie = `__Host-wf_${UNKNOWN_ID}=abc`;
 		expect((await ws(UNKNOWN_ID, { Origin: ORIGIN, Cookie: cookie })).status).toBe(404);
 		expect((await ws("../start", { Origin: ORIGIN, Cookie: cookie })).status).toBe(400);
+	});
+
+	it("[2.ª #6] fecha a ligação quando o cliente envia mensagens inesperadas", async () => {
+		const { instanceId, cookie } = await start();
+		const res = await ws(instanceId, { Origin: ORIGIN, Cookie: cookie });
+		const socket = res.webSocket as WebSocket;
+		socket.accept();
+		const closed = new Promise<number>((resolve) =>
+			socket.addEventListener("close", (e) => resolve(e.code)),
+		);
+		socket.send("spam");
+		expect(await closed).toBe(1008);
 	});
 
 	it("[#4] limita o número de ligações por instância", async () => {

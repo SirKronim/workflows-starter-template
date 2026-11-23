@@ -104,6 +104,17 @@ export class WorkflowStatusDO extends DurableObject {
 		await this.ctx.storage.put("workflowStatus", this.workflowStatus);
 
 		this.broadcast(this.getStateMessage());
+
+		// Workflow terminado: já não há nada a transmitir; fechar as ligações
+		if (this.workflowStatus === "completed") {
+			for (const socket of this.ctx.getWebSockets()) {
+				try {
+					socket.close(1000, "Workflow completed");
+				} catch {
+					// Ignorar sockets já fechados
+				}
+			}
+		}
 	}
 
 	/**
@@ -125,11 +136,16 @@ export class WorkflowStatusDO extends DurableObject {
 
 	/**
 	 * WebSocket message handler (hibernation API).
-	 * Os clientes não precisam de enviar nada: as mensagens são ignoradas
-	 * (os "ping" são respondidos automaticamente, sem acordar o DO).
+	 * Os clientes não precisam de enviar nada (os "ping" são respondidos
+	 * automaticamente, sem acordar o DO). Qualquer outra mensagem é inesperada:
+	 * fecha-se a ligação (1008 = violação de política) para travar abusos.
 	 */
-	async webSocketMessage(_ws: WebSocket, _message: string): Promise<void> {
-		// Intencionalmente vazio
+	async webSocketMessage(ws: WebSocket, _message: string): Promise<void> {
+		try {
+			ws.close(1008, "Unexpected message");
+		} catch {
+			// A ligação já pode estar fechada
+		}
 	}
 
 	/**
