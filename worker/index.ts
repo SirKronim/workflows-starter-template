@@ -243,11 +243,12 @@ async function checkAccess(
 	}
 
 	// Confirmar que a instância existe ANTES de tocar no Durable Object,
-	// para não criar DOs para IDs inventados
+	// para não criar DOs para IDs inventados. Responde 403 (e não 404) para
+	// não revelar, nem a quem forje um cookie, se o ID existe.
 	try {
 		await env.MY_WORKFLOW.get(rawId);
 	} catch {
-		return jsonError("Not Found", 404);
+		return jsonError("Forbidden", 403);
 	}
 
 	const isOwner = await statusStub(env, rawId).isOwner(await sha256Hex(token));

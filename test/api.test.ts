@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 
 /**
@@ -173,7 +173,7 @@ describe("POST /api/workflow/event/:id", () => {
 		expect((await sendEvent(instanceId, { cookie, contentType: "text/plain" })).status).toBe(415);
 	});
 
-	it("[#12] rota exata, ID validado e 404 para instâncias inexistentes", async () => {
+	it("[#12] rota exata, ID validado e 403 para instâncias inexistentes (não revela se existem)", async () => {
 		const unknownCookie = `__Host-wf_${UNKNOWN_ID}=abc`;
 		const nested = await SELF.fetch(`${ORIGIN}/api/workflow/event/a/${UNKNOWN_ID}`, {
 			method: "POST",
@@ -182,7 +182,7 @@ describe("POST /api/workflow/event/:id", () => {
 		});
 		expect(nested.status).toBe(404);
 		expect((await sendEvent("not-a-uuid", { cookie: unknownCookie })).status).toBe(400);
-		expect((await sendEvent(UNKNOWN_ID, { cookie: unknownCookie })).status).toBe(404);
+		expect((await sendEvent(UNKNOWN_ID, { cookie: unknownCookie })).status).toBe(403);
 	});
 
 	it("[2.ª #4] sem chave, recebe sempre 403 (não revela se o ID existe)", async () => {
@@ -231,7 +231,7 @@ describe("GET /ws", () => {
 
 	it("[#4] recusa IDs inventados sem criar Durable Objects", async () => {
 		const cookie = `__Host-wf_${UNKNOWN_ID}=abc`;
-		expect((await ws(UNKNOWN_ID, { Origin: ORIGIN, Cookie: cookie })).status).toBe(404);
+		expect((await ws(UNKNOWN_ID, { Origin: ORIGIN, Cookie: cookie })).status).toBe(403);
 		expect((await ws("../start", { Origin: ORIGIN, Cookie: cookie })).status).toBe(400);
 	});
 
@@ -262,6 +262,21 @@ describe("GET /ws", () => {
 		expect(statuses.slice(0, 5)).toEqual([101, 101, 101, 101, 101]);
 		expect(statuses[5]).toBe(429);
 		sockets.forEach((s) => s.close());
+	});
+});
+
+describe("[final #5] limpeza automática", () => {
+	it("o alarme apaga o estado e a chave do dono deixa de funcionar", async () => {
+		const { instanceId, cookie } = await start();
+		expect((await sendEvent(instanceId, { cookie })).status).toBe(200);
+
+		const stub = env.WORKFLOW_STATUS.get(
+			env.WORKFLOW_STATUS.idFromName(instanceId),
+		);
+		// O alarme foi agendado por setOwner; executá-lo já em vez de esperar 2 h
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
+
+		expect((await sendEvent(instanceId, { cookie })).status).toBe(403);
 	});
 });
 

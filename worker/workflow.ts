@@ -22,7 +22,7 @@ export class MyWorkflow extends WorkflowEntrypoint<
 		// Refer to: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
 		const notifyStep = async (
 			stepName: string,
-			status: "running" | "completed" | "waiting",
+			status: "running" | "completed" | "waiting" | "error",
 		) => {
 			try {
 				const doId = this.env.WORKFLOW_STATUS.idFromName(instanceId);
@@ -48,10 +48,18 @@ export class MyWorkflow extends WorkflowEntrypoint<
 
 		// Step 3: Wait for event - shows interactive step.waitForEvent
 		await notifyStep("wait for approval", "waiting");
-		const approval = await step.waitForEvent("wait for approval", {
-			type: "user-approval",
-			timeout: "60 minutes",
-		});
+		let approval;
+		try {
+			approval = await step.waitForEvent("wait for approval", {
+				type: "user-approval",
+				timeout: "60 minutes",
+			});
+		} catch (err) {
+			// Sem aprovação dentro do prazo: avisar o DO (a UI mostra o erro e as
+			// ligações WebSocket são fechadas) e deixar o workflow falhar
+			await notifyStep("wait for approval", "error");
+			throw err;
+		}
 		await notifyStep("wait for approval", "completed");
 
 		// Step 4: Final step

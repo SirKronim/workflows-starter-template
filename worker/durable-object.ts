@@ -4,6 +4,9 @@ import { timingSafeEqual } from "./security";
 /** Máximo de ligações WebSocket em simultâneo por instância. */
 const MAX_SOCKETS_PER_INSTANCE = 5;
 
+/** Apagar o estado da instância 2 h depois de criada. */
+const CLEANUP_AFTER_MS = 2 * 60 * 60 * 1000;
+
 /**
  * WorkflowStatusDO - Durable Object for managing workflow state and WebSocket connections
  *
@@ -95,6 +98,10 @@ export class WorkflowStatusDO extends DurableObject {
 			this.workflowStatus = "completed";
 			this.currentStep = null;
 		}
+		if (status === "error") {
+			this.workflowStatus = "error";
+			this.currentStep = null;
+		}
 
 		await this.ctx.storage.put(
 			"stepStatuses",
@@ -105,14 +112,28 @@ export class WorkflowStatusDO extends DurableObject {
 
 		this.broadcast(this.getStateMessage());
 
-		// Workflow terminado: já não há nada a transmitir; fechar as ligações
-		if (this.workflowStatus === "completed") {
-			for (const socket of this.ctx.getWebSockets()) {
-				try {
-					socket.close(1000, "Workflow completed");
-				} catch {
-					// Ignorar sockets já fechados
-				}
+		// Workflow terminado (com sucesso ou erro): já não há nada a transmitir
+		if (this.workflowStatus !== "running") {
+			this.closeAllSockets(`Workflow ${this.workflowStatus}`);
+		}
+	}
+
+	/**
+	 * Limpeza automática: apaga todo o estado desta instância (incluindo o hash
+	 * do dono) e fecha as ligações. Agendado por setOwner para 2 h depois,
+	 * bem acima da duração máxima de um workflow (~1 h).
+	 */
+	async alarm(): Promise<void> {
+		this.closeAllSockets("Instance expired");
+		await this.ctx.storage.deleteAll();
+	}
+
+	private closeAllSockets(reason: string): void {
+		for (const socket of this.ctx.getWebSockets()) {
+			try {
+				socket.close(1000, reason);
+			} catch {
+				// Ignorar sockets já fechados
 			}
 		}
 	}
@@ -125,6 +146,7 @@ export class WorkflowStatusDO extends DurableObject {
 		const existing = await this.ctx.storage.get<string>("ownerTokenHash");
 		if (!existing) {
 			await this.ctx.storage.put("ownerTokenHash", tokenHash);
+			await this.ctx.storage.setAlarm(Date.now() + CLEANUP_AFTER_MS);
 		}
 	}
 
