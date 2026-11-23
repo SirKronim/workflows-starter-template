@@ -1,4 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
+import { timingSafeEqual } from "./security";
+
+/** Máximo de ligações WebSocket em simultâneo por instância. */
+const MAX_SOCKETS_PER_INSTANCE = 5;
 
 /**
  * WorkflowStatusDO - Durable Object for managing workflow state and WebSocket connections
@@ -20,6 +24,11 @@ export class WorkflowStatusDO extends DurableObject {
 		this.stepStatuses = new Map();
 		this.currentStep = null;
 		this.workflowStatus = "running";
+
+		// Responde a "ping" com "pong" sem acordar o DO (não conta como duração faturada)
+		ctx.setWebSocketAutoResponse(
+			new WebSocketRequestResponsePair("ping", "pong"),
+		);
 
 		// Load state from durable storage to survive hibernation/eviction
 		ctx.blockConcurrencyWhile(async () => {
@@ -49,6 +58,10 @@ export class WorkflowStatusDO extends DurableObject {
 
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get("Upgrade") === "websocket") {
+			if (this.ctx.getWebSockets().length >= MAX_SOCKETS_PER_INSTANCE) {
+				return new Response("Too many connections", { status: 429 });
+			}
+
 			const pair = new WebSocketPair();
 			const [client, server] = Object.values(pair);
 
@@ -94,11 +107,29 @@ export class WorkflowStatusDO extends DurableObject {
 	}
 
 	/**
-	 * WebSocket message handler (hibernation API)
-	 * Called when a client sends a message
+	 * Regista o dono da instância (hash da chave). Só pode ser definido uma vez.
+	 * Chamado pelo Worker logo a seguir a criar a instância.
 	 */
-	async webSocketMessage(ws: WebSocket, _message: string): Promise<void> {
-		ws.send(JSON.stringify(this.getStateMessage()));
+	async setOwner(tokenHash: string): Promise<void> {
+		const existing = await this.ctx.storage.get<string>("ownerTokenHash");
+		if (!existing) {
+			await this.ctx.storage.put("ownerTokenHash", tokenHash);
+		}
+	}
+
+	/** Verifica se o hash apresentado corresponde ao dono da instância. */
+	async isOwner(tokenHash: string): Promise<boolean> {
+		const stored = await this.ctx.storage.get<string>("ownerTokenHash");
+		return !!stored && timingSafeEqual(stored, tokenHash);
+	}
+
+	/**
+	 * WebSocket message handler (hibernation API).
+	 * Os clientes não precisam de enviar nada: as mensagens são ignoradas
+	 * (os "ping" são respondidos automaticamente, sem acordar o DO).
+	 */
+	async webSocketMessage(_ws: WebSocket, _message: string): Promise<void> {
+		// Intencionalmente vazio
 	}
 
 	/**
@@ -111,7 +142,14 @@ export class WorkflowStatusDO extends DurableObject {
 		reason: string,
 		_wasClean: boolean,
 	): Promise<void> {
-		ws.close(code, reason);
+		// 1005 ("sem código") e 1006 ("fecho anormal") são reservados e não podem
+		// ser enviados; nesses casos responde com 1000 (fecho normal).
+		const sendable = code === 1000 || (code >= 3000 && code <= 4999);
+		try {
+			ws.close(sendable ? code : 1000, sendable ? reason : "");
+		} catch {
+			// A ligação já pode estar fechada
+		}
 	}
 
 	/**

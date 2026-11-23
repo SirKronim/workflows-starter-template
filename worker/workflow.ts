@@ -57,7 +57,9 @@ export class MyWorkflow extends WorkflowEntrypoint<
 		// Step 4: Final step
 		await notifyStep("final", "running");
 		await step.do("final", async () => {
-			console.log("Results:", { result, approval: approval.payload });
+			// Registar só o campo validado; nunca o texto livre do utilizador
+			const { approved } = approval.payload as { approved: boolean };
+			console.log("Results:", { result, approved });
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 		});
 		await notifyStep("final", "completed");

@@ -17,11 +17,14 @@ Demonstração interativa de **Cloudflare Workflows**: um frontend React mostra,
 
 ## Estrutura
 
-- `worker/index.ts`: entrada do Worker, com rotas `/api/workflow/start|status/:id|event/:id` e `/ws`.
+- `worker/index.ts`: entrada do Worker, com rotas `/api/workflow/start|status/:id|event/:id` e `/ws`. Todas passam pelas verificações de segurança (ver "Segurança").
+- `worker/security.ts`: funções de segurança partilhadas (chaves, cookies, Origin, validação do corpo, cabeçalhos).
+- `public/_headers`: cabeçalhos de segurança (CSP, etc.) para os ficheiros estáticos.
 - `worker/workflow.ts`: `MyWorkflow` (`WorkflowEntrypoint`) com `step.do`, `step.sleep` e `step.waitForEvent("user-approval")`.
 - `worker/durable-object.ts`: `WorkflowStatusDO`, que guarda o estado dos passos e transmite-o por WebSocket (API de hibernação).
 - `src/`: frontend React 19 + Tailwind 4. `hooks/useWorkflowWebSocket.ts` liga-se a `/ws?instanceId=…`.
 - `test/workflow.test.ts`: testes com `introspectWorkflowInstance` (`disableSleeps`, `mockEvent`, `forceEventTimeout`).
+- `test/api.test.ts`: testes de segurança da API (`SELF.fetch`). Cada teste corresponde a um problema da auditoria (`[#n]`). Usa um IP diferente por teste por causa do rate limiting.
 - `worker-configuration.d.ts`: **gerado** por `wrangler types`. Não editar à mão.
 - Configs TS separadas: `tsconfig.app.json` (src), `tsconfig.worker.json` (worker + test) e `tsconfig.node.json` (vite config).
 
@@ -33,13 +36,23 @@ Demonstração interativa de **Cloudflare Workflows**: um frontend React mostra,
 - **Versões fixas**: as dependências estão fixas a versões exatas. Não usar `^`/`~` ao adicionar pacotes.
 - **Erros**: as respostas da API não devem expor detalhes internos (manter o padrão `{ error: "..." }`).
 
-## Segurança (o template de origem NÃO está pronto para produção)
+## Segurança
 
-Pontos conhecidos a resolver antes de publicar para o público:
-- Sem autenticação nem rate limiting em `/api/workflow/start` (custos), `/api/workflow/event/:id` (qualquer pessoa pode aprovar) e `/ws`.
-- O corpo de `/api/workflow/event/:id` não é validado (deve ser `{ approved: boolean, comment?: string }` com tamanho limitado).
-- `/ws` aceita qualquer `instanceId` e cria um Durable Object por ID.
-- Sem cabeçalhos de segurança (CSP, X-Content-Type-Options, etc.).
+**Modelo: chave por instância ("capability token").** Não há contas de utilizador.
+- `POST /api/workflow/start` gera uma chave aleatória de 256 bits e entrega-a no cookie `__Host-wf_token` (HttpOnly, Secure, SameSite=Strict, 1 h). O Durable Object da instância guarda só o hash SHA-256 (`setOwner`, definido uma única vez).
+- `status`, `event` e `/ws` exigem a chave do dono (`isOwner`, comparação em tempo constante).
+
+**Ordem das verificações em cada rota** (as mais baratas primeiro, para recusar abusos antes de gastar recursos pagos): método → `Origin` igual ao da app (POST e WebSocket) → rate limit por IP → formato UUID → a instância existe (`MY_WORKFLOW.get`, antes de tocar no DO) → dono.
+
+- **Rate limiting** (`wrangler.jsonc` → `ratelimits`): `START_LIMITER` 5/min e `API_LIMITER` 60/min, por `CF-Connecting-IP`.
+- **Corpo do evento**: `Content-Type: application/json`, até 2 KB, só `{ approved: boolean, comment?: string ≤ 500 }`, reconstruído antes do `sendEvent`.
+- **WebSocket**: no máximo 5 ligações por instância. As mensagens dos clientes são ignoradas; o `ping` é respondido por `setWebSocketAutoResponse`.
+- **Cabeçalhos**: `worker/security.ts` (API) e `public/_headers` (páginas). A CSP proíbe scripts e estilos inline e recursos externos: **não adicionar CDNs, fontes externas nem `<script>` inline** sem atualizar a CSP.
+- **Logs**: nunca registar texto livre do utilizador.
+
+Ao alterar rotas, acrescentar o teste correspondente em `test/api.test.ts`.
+
+**Opcional, se a app for só para uso pessoal:** proteger tudo com Cloudflare Access (configura-se no painel da Cloudflare, não no código).
 
 ## Publicação
 

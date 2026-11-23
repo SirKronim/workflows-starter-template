@@ -50,7 +50,7 @@ export function WorkflowDiagram({
 		if (!instanceId) return;
 
 		try {
-			await fetch(`/api/workflow/event/${instanceId}`, {
+			await fetch(`/api/workflow/event/${encodeURIComponent(instanceId)}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
