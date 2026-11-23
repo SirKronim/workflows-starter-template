@@ -52,7 +52,13 @@ O hook `.claude/hooks/pre-deploy-gate.sh` interceta `wrangler deploy`, `wrangler
 
 `--dry-run` é sempre permitido.
 
+## Auditoria de segurança no início de cada sessão
+
+**Regra do utilizador:** em cada sessão nova, antes de qualquer outra tarefa, corre o subagente `workers-security-reviewer` e mostra ao utilizador o resumo do relatório (tabela por gravidade). Só depois trata do pedido. Se o utilizador pedir para saltar nesta sessão, respeita. O hook `SessionStart` (`.claude/hooks/session-start-audit.sh`) relembra esta regra automaticamente ao arrancar.
+
 ## Hooks ativos (`.claude/settings.json`)
+
+- **No início de cada sessão nova**: instrução para correr a auditoria de segurança (ver acima).
 
 - **Depois de cada edição** de um `.ts`/`.tsx`: ESLint nesse ficheiro e `tsc -b`. Os erros voltam ao Claude para corrigir de imediato.
 - **Antes de publicar**: o pre-deploy gate descrito acima.
