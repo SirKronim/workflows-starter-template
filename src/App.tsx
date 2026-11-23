@@ -10,11 +10,18 @@ function App() {
 	const [isStarting, setIsStarting] = useState(false);
 	const workflowState = useWorkflowWebSocket(instanceId);
 
+	// Workflow terminado: voltar ao início. Em caso de erro (ex.: aprovação
+	// expirada) espera-se mais tempo, para o utilizador ler a mensagem.
 	useEffect(() => {
-		if (workflowState.workflowStatus === "completed") {
-			const timer = setTimeout(() => {
-				setInstanceId(null);
-			}, 1500);
+		const status = workflowState.workflowStatus;
+		if (status === "completed" || status === "error") {
+			const timer = setTimeout(
+				() => {
+					setInstanceId(null);
+					setIsStarting(false);
+				},
+				status === "error" ? 5000 : 1500,
+			);
 			return () => clearTimeout(timer);
 		}
 	}, [workflowState.workflowStatus]);
@@ -90,6 +97,16 @@ function App() {
 					</a>
 				</div>
 			</header>
+
+			{workflowState.workflowStatus === "error" && (
+				<div
+					role="alert"
+					className="mx-6 mb-4 px-4 py-3 rounded-lg relative z-10 text-sm bg-red-500/10 dark:bg-red-500/20 text-red-700 dark:text-red-300 ring-1 ring-red-400/40"
+				>
+					The workflow stopped: no approval was received in time. You can start
+					a new one in a moment.
+				</div>
+			)}
 
 			{/* Main content - unified canvas */}
 			<main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
