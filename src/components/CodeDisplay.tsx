@@ -28,7 +28,7 @@ const WORKFLOW_CODE = `export class MyWorkflow extends WorkflowEntrypoint<Env> {
 
     // Step 4: Final step
     await step.do('final', async () => {
-      console.log('Results:', { result, approval: approval.payload });
+      console.log('Results:', { result, approved: approval.payload.approved });
       await new Promise(resolve => setTimeout(resolve, 1000));
     });
   }

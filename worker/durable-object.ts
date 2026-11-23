@@ -1,4 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
+import { timingSafeEqual } from "./security";
+
+/** Máximo de ligações WebSocket em simultâneo por instância. */
+const MAX_SOCKETS_PER_INSTANCE = 5;
+
+/** Apagar o estado da instância 2 h depois de criada. */
+const CLEANUP_AFTER_MS = 2 * 60 * 60 * 1000;
 
 /**
  * WorkflowStatusDO - Durable Object for managing workflow state and WebSocket connections
@@ -20,6 +27,11 @@ export class WorkflowStatusDO extends DurableObject {
 		this.stepStatuses = new Map();
 		this.currentStep = null;
 		this.workflowStatus = "running";
+
+		// Responde a "ping" com "pong" sem acordar o DO (não conta como duração faturada)
+		ctx.setWebSocketAutoResponse(
+			new WebSocketRequestResponsePair("ping", "pong"),
+		);
 
 		// Load state from durable storage to survive hibernation/eviction
 		ctx.blockConcurrencyWhile(async () => {
@@ -49,6 +61,10 @@ export class WorkflowStatusDO extends DurableObject {
 
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get("Upgrade") === "websocket") {
+			if (this.ctx.getWebSockets().length >= MAX_SOCKETS_PER_INSTANCE) {
+				return new Response("Too many connections", { status: 429 });
+			}
+
 			const pair = new WebSocketPair();
 			const [client, server] = Object.values(pair);
 
@@ -82,6 +98,10 @@ export class WorkflowStatusDO extends DurableObject {
 			this.workflowStatus = "completed";
 			this.currentStep = null;
 		}
+		if (status === "error") {
+			this.workflowStatus = "error";
+			this.currentStep = null;
+		}
 
 		await this.ctx.storage.put(
 			"stepStatuses",
@@ -91,14 +111,63 @@ export class WorkflowStatusDO extends DurableObject {
 		await this.ctx.storage.put("workflowStatus", this.workflowStatus);
 
 		this.broadcast(this.getStateMessage());
+
+		// Workflow terminado (com sucesso ou erro): já não há nada a transmitir
+		if (this.workflowStatus !== "running") {
+			this.closeAllSockets(`Workflow ${this.workflowStatus}`);
+		}
 	}
 
 	/**
-	 * WebSocket message handler (hibernation API)
-	 * Called when a client sends a message
+	 * Limpeza automática: apaga todo o estado desta instância (incluindo o hash
+	 * do dono) e fecha as ligações. Agendado por setOwner para 2 h depois,
+	 * bem acima da duração máxima de um workflow (~1 h).
+	 */
+	async alarm(): Promise<void> {
+		this.closeAllSockets("Instance expired");
+		await this.ctx.storage.deleteAll();
+	}
+
+	private closeAllSockets(reason: string): void {
+		for (const socket of this.ctx.getWebSockets()) {
+			try {
+				socket.close(1000, reason);
+			} catch {
+				// Ignorar sockets já fechados
+			}
+		}
+	}
+
+	/**
+	 * Regista o dono da instância (hash da chave). Só pode ser definido uma vez.
+	 * Chamado pelo Worker logo a seguir a criar a instância.
+	 */
+	async setOwner(tokenHash: string): Promise<void> {
+		const existing = await this.ctx.storage.get<string>("ownerTokenHash");
+		if (!existing) {
+			await this.ctx.storage.put("ownerTokenHash", tokenHash);
+			await this.ctx.storage.setAlarm(Date.now() + CLEANUP_AFTER_MS);
+		}
+	}
+
+	/** Verifica se o hash apresentado corresponde ao dono da instância. */
+	async isOwner(tokenHash: string): Promise<boolean> {
+		const stored = await this.ctx.storage.get<string>("ownerTokenHash");
+		return !!stored && timingSafeEqual(stored, tokenHash);
+	}
+
+	/**
+	 * WebSocket message handler (hibernation API).
+	 * Os clientes não precisam de enviar nada (os "ping" são respondidos
+	 * automaticamente, sem acordar o DO). Qualquer outra mensagem é inesperada:
+	 * fecha-se a ligação (1008 = violação de política) para travar abusos.
 	 */
 	async webSocketMessage(ws: WebSocket, _message: string): Promise<void> {
-		ws.send(JSON.stringify(this.getStateMessage()));
+		try {
+			ws.close(1008, "Unexpected message");
+		} catch {
+			// A ligação já pode estar fechada
+		}
 	}
 
 	/**
@@ -111,7 +180,14 @@ export class WorkflowStatusDO extends DurableObject {
 		reason: string,
 		_wasClean: boolean,
 	): Promise<void> {
-		ws.close(code, reason);
+		// 1005 ("sem código") e 1006 ("fecho anormal") são reservados e não podem
+		// ser enviados; nesses casos responde com 1000 (fecho normal).
+		const sendable = code === 1000 || (code >= 3000 && code <= 4999);
+		try {
+			ws.close(sendable ? code : 1000, sendable ? reason : "");
+		} catch {
+			// A ligação já pode estar fechada
+		}
 	}
 
 	/**

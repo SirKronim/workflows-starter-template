@@ -22,7 +22,7 @@ export class MyWorkflow extends WorkflowEntrypoint<
 		// Refer to: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
 		const notifyStep = async (
 			stepName: string,
-			status: "running" | "completed" | "waiting",
+			status: "running" | "completed" | "waiting" | "error",
 		) => {
 			try {
 				const doId = this.env.WORKFLOW_STATUS.idFromName(instanceId);
@@ -48,16 +48,26 @@ export class MyWorkflow extends WorkflowEntrypoint<
 
 		// Step 3: Wait for event - shows interactive step.waitForEvent
 		await notifyStep("wait for approval", "waiting");
-		const approval = await step.waitForEvent("wait for approval", {
-			type: "user-approval",
-			timeout: "60 minutes",
-		});
+		let approval;
+		try {
+			approval = await step.waitForEvent("wait for approval", {
+				type: "user-approval",
+				timeout: "60 minutes",
+			});
+		} catch (err) {
+			// Sem aprovação dentro do prazo: avisar o DO (a UI mostra o erro e as
+			// ligações WebSocket são fechadas) e deixar o workflow falhar
+			await notifyStep("wait for approval", "error");
+			throw err;
+		}
 		await notifyStep("wait for approval", "completed");
 
 		// Step 4: Final step
 		await notifyStep("final", "running");
 		await step.do("final", async () => {
-			console.log("Results:", { result, approval: approval.payload });
+			// Registar só o campo validado; nunca o texto livre do utilizador
+			const { approved } = approval.payload as { approved: boolean };
+			console.log("Results:", { result, approved });
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 		});
 		await notifyStep("final", "completed");

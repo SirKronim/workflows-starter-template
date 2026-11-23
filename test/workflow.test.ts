@@ -1,4 +1,8 @@
-import { env, introspectWorkflowInstance } from "cloudflare:test";
+import {
+	env,
+	introspectWorkflowInstance,
+	runInDurableObject,
+} from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 
 describe("MyWorkflow", () => {
@@ -44,5 +48,22 @@ describe("MyWorkflow", () => {
 		await env.MY_WORKFLOW.create({ id: instanceId });
 
 		await expect(instance.waitForStatus("errored")).resolves.not.toThrow();
+
+		// O Durable Object foi avisado: estado "error", sem passo atual
+		const stub = env.WORKFLOW_STATUS.get(
+			env.WORKFLOW_STATUS.idFromName(instanceId),
+		);
+		const state = await runInDurableObject(stub, async (_obj, ctx) => ({
+			workflowStatus: await ctx.storage.get("workflowStatus"),
+			currentStep: await ctx.storage.get("currentStep"),
+			approvalStep: (
+				(await ctx.storage.get("stepStatuses")) as Record<string, string>
+			)["wait for approval"],
+		}));
+		expect(state).toEqual({
+			workflowStatus: "error",
+			currentStep: null,
+			approvalStep: "error",
+		});
 	});
 });

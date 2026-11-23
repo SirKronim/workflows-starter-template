@@ -57,7 +57,7 @@ export function useWorkflowWebSocket(instanceId: string | null): WorkflowState {
 
 		// Determine WebSocket protocol based on current location
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-		const wsUrl = `${protocol}//${window.location.host}/ws?instanceId=${instanceId}`;
+		const wsUrl = `${protocol}//${window.location.host}/ws?instanceId=${encodeURIComponent(instanceId)}`;
 
 		const ws = new WebSocket(wsUrl);
 
