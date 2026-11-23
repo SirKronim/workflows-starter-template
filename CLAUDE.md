@@ -43,7 +43,7 @@ Pontos conhecidos a resolver antes de publicar para o público:
 
 ## Publicação
 
-**Nunca publicar sem**: (1) correr uma revisão de segurança do código (`/security-review`), (2) mostrar o resultado ao utilizador e (3) ter a aprovação explícita dele.
+**Nunca publicar sem**: (1) correr uma revisão de segurança do código (o subagente `workers-security-reviewer` e/ou `/security-review`), (2) mostrar o resultado ao utilizador e (3) ter a aprovação explícita dele.
 
 O hook `.claude/hooks/pre-deploy-gate.sh` interceta `wrangler deploy`, `wrangler versions upload|deploy` e `npm run deploy`:
 - Corre lint, typecheck, testes e `npm audit --omit=dev --audit-level=high`.
@@ -56,3 +56,16 @@ O hook `.claude/hooks/pre-deploy-gate.sh` interceta `wrangler deploy`, `wrangler
 
 - **Depois de cada edição** de um `.ts`/`.tsx`: ESLint nesse ficheiro e `tsc -b`. Os erros voltam ao Claude para corrigir de imediato.
 - **Antes de publicar**: o pre-deploy gate descrito acima.
+
+## Permissões (`.claude/settings.json`)
+
+- **Pré-aprovados** (só leem ou verificam): `npm test`, `npm run lint`, `npx tsc -b`, `npm audit` (sem `fix`), `git status`, `git diff`, `git log`.
+- **Proibido ler**: `.dev.vars*` e `.env*`, onde ficam segredos locais. Nunca pedir ao utilizador para os colar no chat.
+
+## Subagente de segurança (`.claude/agents/workers-security-reviewer.md`)
+
+Auditor **só de leitura** (Read, Grep, Glob) com uma lista de verificação para Workers, Workflows, Durable Objects e WebSockets. Usar antes de publicar e depois de alterar `worker/` ou `wrangler.jsonc`. Devolve um relatório em PT-PT, ordenado por gravidade, com `ficheiro:linha`.
+
+## Ambiente na cloud
+
+O ambiente pessoal "workflows-starter-template" corre `npm ci` no arranque de cada sessão. Não é preciso instalar dependências à mão.
