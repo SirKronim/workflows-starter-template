@@ -47,7 +47,9 @@ Demonstração interativa de **Cloudflare Workflows**: um frontend React mostra,
 - **Rate limiting** (`wrangler.jsonc` → `ratelimits`): `START_LIMITER` 5/min por cliente, `GLOBAL_START_LIMITER` 100/min para todos e `API_LIMITER` 60/min por cliente. O "cliente" é o IPv4, ou o prefixo **/64** em IPv6 (`clientKey`). Os contadores são janelas fixas de 60 s por localização da Cloudflare.
 - **Corpo do evento**: `Content-Type: application/json`, lido com `readBodyLimited` (nunca guarda mais de 2 KB em memória, com ou sem `Content-Length`), só `{ approved: boolean, comment?: string ≤ 500 }`, reconstruído antes do `sendEvent`.
 - **WebSocket**: no máximo 5 ligações por instância. O `ping` é respondido por `setWebSocketAutoResponse`. Qualquer outra mensagem fecha a ligação (1008). Todas as ligações fecham quando o workflow termina, com sucesso ou com erro (por exemplo, aprovação expirada: `workflow.ts` avisa o DO com `"error"`).
-- **Limpeza**: `setOwner` agenda um alarme para daqui a 2 h. O `alarm()` fecha as ligações e apaga todo o estado do DO, incluindo o hash do dono.
+- **Limpeza** (alarm do DO): `setOwner` agenda a primeira verificação para daqui a 2 h. Se o workflow ainda estiver `running`, o `alarm()` adia mais 2 h, em vez de apagar a chave a meio. Ao fim de 24 h desde a criação (`createdAt`) apaga tudo, esteja como estiver. Quando o workflow termina (`completed`/`error`), a limpeza é antecipada para daqui a 10 min. Ligações WebSocket abertas depois do fim recebem o estado final e são fechadas logo.
+- **Cookie**: `Max-Age` de 65 min, com uma margem sobre o prazo de aprovação de 60 min.
+- **Interface**: o estado `"error"` mostra um aviso e o passo a vermelho, e volta ao início ao fim de 5 s.
 - **Cabeçalhos**: `worker/security.ts` (API) e `public/_headers` (páginas). A CSP proíbe scripts e estilos inline e recursos externos: **não adicionar CDNs, fontes externas nem `<script>` inline** sem atualizar a CSP.
 - **Logs**: nunca registar texto livre do utilizador.
 

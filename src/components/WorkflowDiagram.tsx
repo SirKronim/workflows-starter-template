@@ -257,7 +257,9 @@ export function WorkflowDiagram({
 											? "bg-yellow-500/5 dark:bg-yellow-500/10 ring-yellow-400/40 dark:ring-yellow-500/40"
 											: status === "completed"
 												? "bg-white/60 dark:bg-neutral-900/60 ring-green-400/30 dark:ring-green-500/30"
-												: "bg-white/60 dark:bg-neutral-900/60 ring-black/5 dark:ring-white/10"
+												: status === "error"
+													? "bg-red-500/5 dark:bg-red-500/10 ring-red-400/40 dark:ring-red-500/40"
+													: "bg-white/60 dark:bg-neutral-900/60 ring-black/5 dark:ring-white/10"
 								}`}
 							>
 								<div className="flex items-center gap-2">
@@ -270,7 +272,9 @@ export function WorkflowDiagram({
 													? "bg-yellow-500/10 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400"
 													: status === "running"
 														? "bg-blue-500/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400"
-														: "bg-neutral-500/10 dark:bg-neutral-500/20 text-neutral-600 dark:text-neutral-300"
+														: status === "error"
+															? "bg-red-500/10 dark:bg-red-500/20 text-red-700 dark:text-red-400"
+															: "bg-neutral-500/10 dark:bg-neutral-500/20 text-neutral-600 dark:text-neutral-300"
 										}`}
 									>
 										{status === "completed" ? (
@@ -299,6 +303,21 @@ export function WorkflowDiagram({
 													strokeLinejoin="round"
 													strokeWidth={2}
 													d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+												/>
+											</svg>
+										) : status === "error" ? (
+											<svg
+												className="w-3.5 h-3.5"
+												fill="none"
+												stroke="currentColor"
+												viewBox="0 0 24 24"
+												aria-label="Error"
+											>
+												<path
+													strokeLinecap="round"
+													strokeLinejoin="round"
+													strokeWidth={2}
+													d="M6 18L18 6M6 6l12 12"
 												/>
 											</svg>
 										) : status === "running" ? (

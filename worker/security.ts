@@ -6,7 +6,9 @@
  * guarda o hash SHA-256 da chave (no Durable Object da instância).
  */
 
-const TOKEN_MAX_AGE_SECONDS = 60 * 60; // igual ao timeout do waitForEvent
+// 65 min: o prazo de aprovação (60 min) só começa uns segundos depois do /start,
+// por isso o cookie tem uma pequena margem para não expirar antes do prazo
+const TOKEN_MAX_AGE_SECONDS = 65 * 60;
 
 export const MAX_EVENT_BODY_BYTES = 2048;
 export const MAX_COMMENT_LENGTH = 500;

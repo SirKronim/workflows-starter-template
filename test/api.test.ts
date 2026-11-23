@@ -1,4 +1,9 @@
-import { SELF, env, runDurableObjectAlarm } from "cloudflare:test";
+import {
+	SELF,
+	env,
+	runDurableObjectAlarm,
+	runInDurableObject,
+} from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 
 /**
@@ -265,18 +270,82 @@ describe("GET /ws", () => {
 	});
 });
 
-describe("[final #5] limpeza automática", () => {
-	it("o alarme apaga o estado e a chave do dono deixa de funcionar", async () => {
-		const { instanceId, cookie } = await start();
-		expect((await sendEvent(instanceId, { cookie })).status).toBe(200);
+describe("limpeza automática ([final #5] e [baixa #1])", () => {
+	function stubFor(instanceId: string) {
+		return env.WORKFLOW_STATUS.get(env.WORKFLOW_STATUS.idFromName(instanceId));
+	}
 
-		const stub = env.WORKFLOW_STATUS.get(
-			env.WORKFLOW_STATUS.idFromName(instanceId),
-		);
+	it("[baixa #1] não apaga a chave de um workflow ainda ativo: adia a limpeza", async () => {
+		const { instanceId, cookie } = await start();
+		const stub = stubFor(instanceId);
+
 		// O alarme foi agendado por setOwner; executá-lo já em vez de esperar 2 h
 		expect(await runDurableObjectAlarm(stub)).toBe(true);
 
+		// O dono continua a conseguir aprovar e há um novo alarme agendado
+		expect((await sendEvent(instanceId, { cookie })).status).toBe(200);
+		const alarm = await runInDurableObject(stub, (_o, ctx) => ctx.storage.getAlarm());
+		expect(alarm).toBeGreaterThan(Date.now());
+	});
+
+	it("[baixa #1] ao fim de 24 h apaga tudo, mesmo que ainda conste como ativo", async () => {
+		const { instanceId, cookie } = await start();
+		const stub = stubFor(instanceId);
+		await runInDurableObject(stub, (_o, ctx) =>
+			ctx.storage.put("createdAt", Date.now() - 25 * 60 * 60 * 1000),
+		);
+
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
 		expect((await sendEvent(instanceId, { cookie })).status).toBe(403);
+	});
+
+	it("[final #5] depois de terminar, agenda a limpeza para daqui a ~10 min e apaga tudo", async () => {
+		const { instanceId, cookie } = await start();
+		const stub = stubFor(instanceId);
+		await runInDurableObject(stub, (obj) => obj.updateStep("final", "error"));
+
+		const alarm = (await runInDurableObject(stub, (_o, ctx) =>
+			ctx.storage.getAlarm(),
+		)) as number;
+		expect(alarm - Date.now()).toBeLessThanOrEqual(10 * 60 * 1000);
+		expect(alarm - Date.now()).toBeGreaterThan(9 * 60 * 1000);
+
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
+		expect((await sendEvent(instanceId, { cookie })).status).toBe(403);
+	});
+});
+
+describe("[baixa #2] WebSocket depois de o workflow terminar", () => {
+	it("envia o estado final e fecha a ligação logo a seguir", async () => {
+		const { instanceId, cookie } = await start();
+		const stub = env.WORKFLOW_STATUS.get(env.WORKFLOW_STATUS.idFromName(instanceId));
+		await runInDurableObject(stub, (obj) => obj.updateStep("final", "error"));
+
+		const res = await SELF.fetch(`${ORIGIN}/ws?instanceId=${instanceId}`, {
+			headers: { Upgrade: "websocket", Origin: ORIGIN, Cookie: cookie, "CF-Connecting-IP": nextIp() },
+		});
+		expect(res.status).toBe(101);
+		const socket = res.webSocket as WebSocket;
+		const messages: string[] = [];
+		socket.addEventListener("message", (e) => messages.push(e.data as string));
+		const t0 = Date.now();
+		const closed = new Promise<number>((resolve) =>
+			socket.addEventListener("close", (e) => resolve(e.code)),
+		);
+		socket.accept();
+
+		expect(await closed).toBe(1000);
+		// Fecha logo na ligação, e não só quando o workflow (que continua a
+		// correr em segundo plano no teste) envia a atualização seguinte (~1 s)
+		expect(Date.now() - t0).toBeLessThan(500);
+		expect(JSON.parse(messages[0]).workflowStatus).toBe("error");
+	});
+});
+
+describe("[baixa #4] validade do cookie", () => {
+	it("dura 65 min, um pouco mais do que o prazo de aprovação de 60 min", async () => {
+		const { setCookie } = await start();
+		expect(setCookie).toContain("Max-Age=3900");
 	});
 });
 

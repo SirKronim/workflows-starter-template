@@ -4,8 +4,12 @@ import { timingSafeEqual } from "./security";
 /** Máximo de ligações WebSocket em simultâneo por instância. */
 const MAX_SOCKETS_PER_INSTANCE = 5;
 
-/** Apagar o estado da instância 2 h depois de criada. */
+/** Primeira verificação de limpeza: 2 h depois de criada. */
 const CLEANUP_AFTER_MS = 2 * 60 * 60 * 1000;
+/** Depois de o workflow terminar (sucesso ou erro), limpar 10 min depois. */
+const CLEANUP_AFTER_FINISH_MS = 10 * 60 * 1000;
+/** Limite absoluto: mesmo "a correr", o estado é apagado 24 h depois de criado. */
+const MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /**
  * WorkflowStatusDO - Durable Object for managing workflow state and WebSocket connections
@@ -74,6 +78,11 @@ export class WorkflowStatusDO extends DurableObject {
 			// Send current state immediately upon connection
 			server.send(JSON.stringify(this.getStateMessage()));
 
+			// Workflow já terminado: enviar o estado final e fechar logo
+			if (this.workflowStatus !== "running") {
+				server.close(1000, `Workflow ${this.workflowStatus}`);
+			}
+
 			return new Response(null, { status: 101, webSocket: client });
 		}
 
@@ -112,18 +121,31 @@ export class WorkflowStatusDO extends DurableObject {
 
 		this.broadcast(this.getStateMessage());
 
-		// Workflow terminado (com sucesso ou erro): já não há nada a transmitir
+		// Workflow terminado (com sucesso ou erro): já não há nada a transmitir;
+		// fechar as ligações e antecipar a limpeza
 		if (this.workflowStatus !== "running") {
 			this.closeAllSockets(`Workflow ${this.workflowStatus}`);
+			await this.ctx.storage.setAlarm(Date.now() + CLEANUP_AFTER_FINISH_MS);
 		}
 	}
 
 	/**
 	 * Limpeza automática: apaga todo o estado desta instância (incluindo o hash
-	 * do dono) e fecha as ligações. Agendado por setOwner para 2 h depois,
-	 * bem acima da duração máxima de um workflow (~1 h).
+	 * do dono) e fecha as ligações.
+	 * - Se o workflow ainda estiver a correr (ex.: ficou em fila ou o passo
+	 *   final está a ser repetido), adia a limpeza em vez de apagar a chave
+	 *   do dono a meio.
+	 * - Para nunca adiar para sempre (ex.: o workflow falhou sem avisar),
+	 *   apaga tudo ao fim de 24 h, esteja como estiver.
 	 */
 	async alarm(): Promise<void> {
+		const createdAt =
+			(await this.ctx.storage.get<number>("createdAt")) ?? 0;
+		const age = Date.now() - createdAt;
+		if (this.workflowStatus === "running" && age < MAX_LIFETIME_MS) {
+			await this.ctx.storage.setAlarm(Date.now() + CLEANUP_AFTER_MS);
+			return;
+		}
 		this.closeAllSockets("Instance expired");
 		await this.ctx.storage.deleteAll();
 	}
@@ -146,6 +168,7 @@ export class WorkflowStatusDO extends DurableObject {
 		const existing = await this.ctx.storage.get<string>("ownerTokenHash");
 		if (!existing) {
 			await this.ctx.storage.put("ownerTokenHash", tokenHash);
+			await this.ctx.storage.put("createdAt", Date.now());
 			await this.ctx.storage.setAlarm(Date.now() + CLEANUP_AFTER_MS);
 		}
 	}
